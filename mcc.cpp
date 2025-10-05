@@ -1,111 +1,37 @@
-#include <algorithm>
-#include <array>
-#include <cmath>
-#include <deque>
-#include <iomanip>
-#include <iostream>
-#include <iterator>
-#include <limits>
-#include <map>
-#include <numeric>
-#include <queue>
-#include <string>
-#include <tuple>
-#include <utility>
-#include <vector>
+#include "mcc.hpp"
+
 using namespace std;
 
-// SchedulingState tracks the scheduling progress of each task
-enum class SchedulingState {
-    UNSCHEDULED = 0,    // Initial state before scheduling
-    SCHEDULED = 1,      // Task has been scheduled in initial phase
-    KERNEL_SCHEDULED = 2 // Task has been processed by kernel algorithm during migration
-};
-
-// Task class represents a node in the directed acyclic task graph (DAG)
-class Task {
-public:
-    int id;  // Unique task identifier
-    // pred_tasks and succ_tasks implement the precedence constraints
-    // described where each edge (vi,vj) represents that
-    // task vi must complete before task vj starts
-    vector<int> pred_tasks;  // Immediate predecessors in the task graph
-    vector<int> succ_tasks;  // Immediate successors in the task graph
-
-    // Execution times for different processing units
-    // where execution time T_i^l is inversely proportional to core frequency f_k
-    array<int,3> core_execution_times;  // T_i^l for each local core k
-    // Cloud execution phases:
-    // [0] = sending time (T_i^s)
-    // [1] = cloud computation time (T_i^c)
-    // [2] = receiving time (T_i^r)
-    array<int,3> cloud_execution_times;
-
-    // Finish times for different execution phases
-    // These track when each phase of task execution completes
-    int FT_l;   // Local core finish time
-    int FT_ws;  // Wireless sending finish time 
-    int FT_c;   // Cloud computation finish time
-    int FT_wr;  // Wireless receiving finish time
-
-    // Ready times for different execution phases
-    // These represent the earliest times when a task can start on each resource
-    int RT_l;   // Ready time for local execution (Equation 3)
-    int RT_ws;  // Ready time for wireless sending (Equation 4)
-    int RT_c;   // Ready time for cloud execution (Equation 5)
-    int RT_wr;  // Ready time for receiving results (Equation 6)
-
-    // Priority score used in the initial scheduling phase
-    // Calculated according to (Equations 15-16)
-    double priority_score;
-
-    // Task assignment: -1 for cloud, 0...K-1 for local cores
-    // This implements the execution location tracking
-    int assignment;
-
-    // Flags whether task is initially assigned to core (vs cloud)
-    // Used in primary assignment phase
-    bool is_core_task;
-
-    // Tracks start times for task on different execution units
-    // Used for scheduling and migration decisions
-    vector<int> execution_unit_task_start_times;
-    int execution_finish_time;
-
-    // Current state in the scheduling process
-    SchedulingState is_scheduled;
-
-    // Constructor initializes a task with its execution time requirements
-    Task(int task_id,
-         const map<int, array<int,3>>& core_exec_times_map,
-         const array<int,3>& cloud_exec_times_input)
-        : id(task_id),
-          FT_l(0),
-          FT_ws(0),
-          FT_c(0),
-          FT_wr(0),
-          RT_l(-1),
-          RT_ws(-1),
-          RT_c(-1),
-          RT_wr(-1),
-          priority_score(-1.0),
-          assignment(-2),
-          is_core_task(false),
-          execution_finish_time(-1),
-          is_scheduled(SchedulingState::UNSCHEDULED)
-    {
-        // Set local core execution times if available
-        auto it = core_exec_times_map.find(id);
-        if (it != core_exec_times_map.end()) {
-            this->core_execution_times = it->second;
-        } else {
-            this->core_execution_times = {0,0,0};
-        }
-
-        // Set cloud execution phase times
-        this->cloud_execution_times = cloud_exec_times_input;
+// Constructor initializes a task with its execution time requirements
+Task::Task(int task_id,
+           const map<int, array<int,3>>& core_exec_times_map,
+           const array<int,3>& cloud_exec_times_input)
+    : id(task_id),
+      FT_l(0),
+      FT_ws(0),
+      FT_c(0),
+      FT_wr(0),
+      RT_l(-1),
+      RT_ws(-1),
+      RT_c(-1),
+      RT_wr(-1),
+      priority_score(-1.0),
+      assignment(-2),
+      is_core_task(false),
+      execution_finish_time(-1),
+      is_scheduled(SchedulingState::UNSCHEDULED)
+{
+    // Set local core execution times if available
+    auto it = core_exec_times_map.find(id);
+    if (it != core_exec_times_map.end()) {
+        this->core_execution_times = it->second;
+    } else {
+        this->core_execution_times = {0,0,0};
     }
-};
+
+    // Set cloud execution phase times
+    this->cloud_execution_times = cloud_exec_times_input;
+}
 
 // Calculates the total application completion time
 // T^total = max(max(FT_i^l, FT_i^wr)) for all exit tasks
@@ -290,30 +216,26 @@ double calculate_priority(
     return task_priority;
 }
 
-// InitialTaskScheduler implements the initial scheduling algorithm
-// Its goal is to generate a minimal-delay schedule before energy optimization begins
-class InitialTaskScheduler {
-public:
-    // Constructor initializes the scheduler with tasks and available resources
-    InitialTaskScheduler(vector<Task>& tasks, int num_cores=3)
-        : tasks(tasks),           // Tasks to be scheduled
-          k(num_cores),           // Number of local cores available
-          ws_ready(0),            // Tracks when wireless sending channel is available
-          wr_ready(0)            // Tracks when wireless receiving channel is available
-    {
-        // Initialize arrays to track resource availability
-        // core_earliest_ready[i] tracks when core i will next be available
-        core_earliest_ready.resize(k, 0);
-        
-        // sequences stores the ordered list of tasks for each execution unit
-        // Index 0 to k-1 are for local cores
-        // Index k is for cloud tasks (wireless sending channel)
-        sequences.resize(k+1);
-    }
+// Constructor initializes the scheduler with tasks and available resources
+InitialTaskScheduler::InitialTaskScheduler(vector<Task>& tasks, int num_cores)
+    : tasks(tasks),           // Tasks to be scheduled
+      k(num_cores),           // Number of local cores available
+      ws_ready(0),            // Tracks when wireless sending channel is available
+      wr_ready(0)            // Tracks when wireless receiving channel is available
+{
+    // Initialize arrays to track resource availability
+    // core_earliest_ready[i] tracks when core i will next be available
+    core_earliest_ready.resize(k, 0);
 
-    // Implements task ordering based on priorities calculated
-    // Returns tasks sorted by descending priority to determine scheduling order
-    vector<int> get_priority_ordered_tasks() {
+    // sequences stores the ordered list of tasks for each execution unit
+    // Index 0 to k-1 are for local cores
+    // Index k is for cloud tasks (wireless sending channel)
+    sequences.resize(k+1);
+}
+
+// Implements task ordering based on priorities calculated
+// Returns tasks sorted by descending priority to determine scheduling order
+vector<int> InitialTaskScheduler::get_priority_ordered_tasks() {
         // Create pairs of (priority_score, task_id) for sorting
         vector<pair<double,int>> task_priority_list;
         for (auto &t : tasks) {
@@ -335,10 +257,10 @@ public:
         return result;
     }
 
-    // Separates tasks into entry tasks and non-entry tasks while preserving priority order
-    pair<vector<Task*>, vector<Task*>> classify_entry_tasks(
+// Separates tasks into entry tasks and non-entry tasks while preserving priority order
+pair<vector<Task*>, vector<Task*>> InitialTaskScheduler::classify_entry_tasks(
     const vector<int>& priority_order
-    ) {
+) {
     vector<Task*> entry_tasks;     // Tasks with no predecessors
     vector<Task*> non_entry_tasks; // Tasks with predecessors
 
@@ -354,21 +276,13 @@ public:
         }
     }
     return {entry_tasks, non_entry_tasks};
-    }
+}
 
-    // Represents a potential core assignment for a task
-    // Tracks both timing and resource allocation details
-    struct CoreChoice {
-    int core;         // Which core would be used
-    int start_time;   // When the task could start
-    int finish_time;  // When the task would complete
-    };
-
-    // Finds the best local core for a task by minimizing completion time
-    CoreChoice identify_optimal_local_core(
+// Finds the best local core for a task by minimizing completion time
+InitialTaskScheduler::CoreChoice InitialTaskScheduler::identify_optimal_local_core(
     Task &task,
-    int ready_time=0  // Earliest time task can start due to dependencies
-    ) {
+    int ready_time  // Earliest time task can start due to dependencies
+) {
     // Initialize with worst-case values to ensure any valid choice is better
     int best_finish_time = numeric_limits<int>::max();
     int best_core = -1;
@@ -395,16 +309,16 @@ public:
     }
 
     return {best_core, best_start_time, best_finish_time};
-    }
+}
 
-    // Implements the local task scheduling mechanism
-    // Handles all aspects of assigning a task to a specific local core
-    void schedule_on_local_core(
-        Task &task,          // Task being scheduled
-        int core,            // Target core for execution
-        int start_time,      // When task will begin
-        int finish_time      // When task will complete
-    ) {
+// Implements the local task scheduling mechanism
+// Handles all aspects of assigning a task to a specific local core
+void InitialTaskScheduler::schedule_on_local_core(
+    Task &task,          // Task being scheduled
+    int core,            // Target core for execution
+    int start_time,      // When task will begin
+    int finish_time      // When task will complete
+) {
     // Record the local finish time (FT_l) as described in Section II.C
     // This is crucial for calculating total completion time
     task.FT_l = finish_time;
@@ -426,22 +340,11 @@ public:
     // Add task to the sequence for this core
     // This maintains the execution order needed for the scheduling algorithm
     sequences[core].push_back(task.id);
-    }
+}
 
-    // Implements the timing structure for cloud execution
-    // Tracks all three phases of cloud execution: sending, cloud computation, and receiving
-    struct CloudTiming {
-        int send_ready;      // RT_ws: Ready time for wireless sending (Equation 4)
-        int send_finish;     // FT_ws: When data transmission to cloud completes
-        int cloud_ready;     // RT_c: When cloud can begin processing (Equation 5)
-        int cloud_finish;    // FT_c: When cloud computation completes
-        int receive_ready;   // RT_wr: When results can begin downloading (Equation 6)
-        int receive_finish;  // FT_wr: When mobile device has complete results
-    };
-
-    // Calculates timing for all three phases of cloud execution
-    // Returns a complete timeline for sending, cloud computation, and receiving results
-    CloudTiming calculate_cloud_phases_timing(Task &task) {
+// Calculates timing for all three phases of cloud execution
+// Returns a complete timeline for sending, cloud computation, and receiving results
+InitialTaskScheduler::CloudTiming InitialTaskScheduler::calculate_cloud_phases_timing(Task &task) {
         // Phase 1: Wireless Sending Phase
         // RT_ws (send_ready) comes from task dependencies (Equation 4)
         // This represents the earliest time can start sending data to cloud
@@ -473,19 +376,19 @@ public:
 
         // Return complete timeline of all cloud execution phases
         return {send_ready, send_finish, cloud_ready, cloud_finish, receive_ready, receive_finish};
-    }
+}
 
-    // Records the complete timeline of a task's cloud execution phases
-    // Implements the cloud scheduling model and timing tracking
-    void schedule_on_cloud(
-        Task &task,          // Task being scheduled for cloud execution
-        int send_ready,      // RT_ws: When can start sending data
-        int send_finish,     // FT_ws: When data transmission completes
-        int cloud_ready,     // RT_c: When cloud computation can begin
-        int cloud_finish,    // FT_c: When cloud computation ends
-        int receive_ready,   // RT_wr: When can start receiving results
-        int receive_finish   // FT_wr: When all results are received
-        ) {
+// Records the complete timeline of a task's cloud execution phases
+// Implements the cloud scheduling model and timing tracking
+void InitialTaskScheduler::schedule_on_cloud(
+    Task &task,          // Task being scheduled for cloud execution
+    int send_ready,      // RT_ws: When can start sending data
+    int send_finish,     // FT_ws: When data transmission completes
+    int cloud_ready,     // RT_c: When cloud computation can begin
+    int cloud_finish,    // FT_c: When cloud computation ends
+    int receive_ready,   // RT_wr: When can start receiving results
+    int receive_finish   // FT_wr: When all results are received
+) {
         // Record sending phase timing
         // RT_ws comes from task dependencies (Equation 4)
         // FT_ws represents when data transmission completes
@@ -530,11 +433,11 @@ public:
 
         // Add task to cloud execution sequence
         sequences[k].push_back(task.id);
-    }
+}
 
-    // Schedules all entry tasks (tasks with no predecessors)
-    // Handles both local and cloud execution while respecting resource constraints
-    void schedule_entry_tasks(vector<Task*> &entry_tasks) {
+// Schedules all entry tasks (tasks with no predecessors)
+// Handles both local and cloud execution while respecting resource constraints
+void InitialTaskScheduler::schedule_entry_tasks(vector<Task*> &entry_tasks) {
         // Keep track of tasks that need cloud execution
         // We handle these separately because cloud scheduling needs
         // to account for wireless channel availability
@@ -574,11 +477,11 @@ public:
             // This updates both task state and wireless channel availability
             schedule_on_cloud(*task, timing.send_ready, timing.send_finish, timing.cloud_ready, timing.cloud_finish, timing.receive_ready, timing.receive_finish);
         }
-    }
+}
 
-    // Calculates ready times for non-entry tasks based on their predecessors
-    // Implements the ready time calculations from equations 3 and 4
-    void calculate_non_entry_task_ready_times(Task &task) {
+// Calculates ready times for non-entry tasks based on their predecessors
+// Implements the ready time calculations from equations 3 and 4
+void InitialTaskScheduler::calculate_non_entry_task_ready_times(Task &task) {
         // Calculate RT_l (ready time for local execution)
         // This implements Equation 3 from the paper
         int max_pred_finish_l_wr = 0;
@@ -612,10 +515,10 @@ public:
         // - All predecessors complete
         // - Wireless sending channel becomes available
         task.RT_ws = max(max_pred_finish_l_ws, ws_ready);
-    }
+}
 
-    // Schedules non-entry tasks with dependency and resource constraints
-    void schedule_non_entry_tasks(vector<Task*> &non_entry_tasks) {
+// Schedules non-entry tasks with dependency and resource constraints
+void InitialTaskScheduler::schedule_non_entry_tasks(vector<Task*> &non_entry_tasks) {
         // Process tasks in priority order
         for (auto* task : non_entry_tasks) {
             // First, calculate when this task could potentially start
@@ -653,29 +556,13 @@ public:
                 }
             }
         }
-    }
+}
 
-    // Returns the final scheduling sequences for all execution units
-    // Each sequence represents the order of tasks assigned to that resource
-    vector<vector<int>> get_sequences() const {
-        return sequences;
-    }
-    // All tasks in the task graph
-    vector<Task> &tasks;
-    // Number of available local cores (K)
-    // Represents the cores in the mobile device
-    int k;
-    // Tracks when each core will next be available
-    vector<int> core_earliest_ready;
-    // Tracks when wireless sending channel will be free
-    int ws_ready;
-    // Tracks when wireless receiving channel will be free
-    int wr_ready;
-    // Stores the execution sequences for each resource
-    // sequences[0] to sequences[k-1] are for local cores
-    // sequences[k] is for cloud execution
-    vector<vector<int>> sequences;
-};
+// Returns the final scheduling sequences for all execution units
+// Each sequence represents the order of tasks assigned to that resource
+vector<vector<int>> InitialTaskScheduler::get_sequences() const {
+    return sequences;
+}
 
 // Implements the complete execution unit selection phase
 vector<vector<int>> execution_unit_selection(vector<Task>& tasks) {
@@ -739,27 +626,24 @@ vector<vector<int>> construct_sequence(
     return original_sequence;
 }
 
-// Implements the kernel algorithm (linear-time rescheduling)
-class KernelScheduler {
-public:
-    // Constructor initializes the scheduler with tasks and their current sequences
-    KernelScheduler(vector<Task>& tasks, vector<vector<int>>& sequences)
-        : tasks(tasks), sequences(sequences)
-    {
-        // Initialize ready times for local cores (RT_l)
-        // These track when each core will next be available
-        RT_ls = {0,0,0};
+// Constructor initializes the scheduler with tasks and their current sequences
+KernelScheduler::KernelScheduler(vector<Task>& tasks, vector<vector<int>>& sequences)
+    : tasks(tasks), sequences(sequences)
+{
+    // Initialize ready times for local cores (RT_l)
+    // These track when each core will next be available
+    RT_ls = {0,0,0};
 
-        // Initialize ready times for cloud execution phases
-        // [0] = sending, [1] = computation, [2] = receiving
-        cloud_phases_ready_times = {0,0,0};
+    // Initialize ready times for cloud execution phases
+    // [0] = sending, [1] = computation, [2] = receiving
+    cloud_phases_ready_times = {0,0,0};
 
-        // Initialize task state tracking vectors
-        tie(dependency_ready, sequence_ready) = initialize_task_state();
-    }
+    // Initialize task state tracking vectors
+    tie(dependency_ready, sequence_ready) = initialize_task_state();
+}
 
-    // Sets up initial task state tracking for dependencies and sequences
-    pair<vector<int>, vector<int>> initialize_task_state() {
+// Sets up initial task state tracking for dependencies and sequences
+pair<vector<int>, vector<int>> KernelScheduler::initialize_task_state() {
         // Track how many predecessors each task is still waiting for
         vector<int> dependency_ready(tasks.size(), 0);
         for (size_t i = 0; i < tasks.size(); i++) {
@@ -776,10 +660,10 @@ public:
             }
         }
         return {dependency_ready, sequence_ready};
-    }
+}
 
-    // Updates the readiness state of a task based on its dependencies and sequence position
-    void update_task_state(Task &task) {
+// Updates the readiness state of a task based on its dependencies and sequence position
+void KernelScheduler::update_task_state(Task &task) {
         // Only update state for tasks not yet scheduled by kernel algorithm
         if (task.is_scheduled != SchedulingState::KERNEL_SCHEDULED) {
             // First, handle dependency tracking
@@ -817,10 +701,10 @@ public:
                 }
             }
         }
-    }
+}
 
-    // Schedules a task for execution on a local core
-    void schedule_local_task(Task &task) {
+// Schedules a task for execution on a local core
+void KernelScheduler::schedule_local_task(Task &task) {
         // Calculate when the task could theoretically start by checking
         // all of its prerequisites (predecessor tasks)
         if (task.pred_tasks.empty()) {
@@ -862,9 +746,9 @@ public:
         task.FT_ws = -1;  // No cloud sending phase
         task.FT_c = -1;   // No cloud computation phase
         task.FT_wr = -1;  // No cloud receiving phase
-    }
+}
 
-    void schedule_cloud_task(Task &task) {
+void KernelScheduler::schedule_cloud_task(Task &task) {
         // Phase 1: Calculate when can start sending data to the cloud
         if (task.pred_tasks.empty()) {
             task.RT_ws = 0;  // No prerequisites, can start immediately
@@ -908,10 +792,10 @@ public:
         cloud_phases_ready_times[2] = task.FT_wr;
         // Clear local execution time since this task runs in the cloud
         task.FT_l = -1;
-    }
+}
 
-    // Initializes the scheduling queue by identifying tasks that are ready to execute
-    deque<Task*> initialize_queue() {
+// Initializes the scheduling queue by identifying tasks that are ready to execute
+deque<Task*> KernelScheduler::initialize_queue() {
         deque<Task*> dq;  // Will hold tasks ready for scheduling
 
         // Examine each task in the system
@@ -936,25 +820,7 @@ public:
             }
         }
         return dq;
-    }
-
-    // Task graph tasks and current execution sequences
-    vector<Task> &tasks;
-    vector<vector<int>> &sequences;
-    // Tracks when each local core will next be available
-    // RT_ls[i] represents the ready time for core i
-    array<int,3> RT_ls;
-    // Tracks ready times for each cloud execution phase:
-    // [0] = sending channel
-    // [1] = cloud computation
-    // [2] = receiving channel
-    array<int,3> cloud_phases_ready_times;
-    // Tracks how many dependencies each task is still waiting for
-    vector<int> dependency_ready;
-    // Tracks whether each task is ready in its execution sequence
-    // -1 = not ready, 0 = ready to execute, 1 = waiting for previous task
-    vector<int> sequence_ready;
-};
+}
 
 // Implements the linear-time kernel algorithm
 // This function reschedules tasks after migrations while maintaining dependencies
@@ -1018,24 +884,17 @@ vector<Task>& kernel_algorithm(
     return tasks;
 }
 
-// Defines a unique key for caching migration scenarios
-struct MigrationKey {
-    int task_idx;                  // Which task considering moving
-    int target_execution_unit;     // Target location
-    vector<int> assignments;  // Current assignments of all tasks
-
-    // Defines how to compare two migration scenarios
-    bool operator<(const MigrationKey& other) const {
-        // Compare task indices first
-        if (task_idx != other.task_idx) 
-            return task_idx < other.task_idx;
-        // If tasks are the same, compare target execution units
-        if (target_execution_unit != other.target_execution_unit) 
-            return target_execution_unit < other.target_execution_unit;
-        // Finally, compare the entire assignment state
-        return assignments < other.assignments;
-    }
-};
+// Defines how to compare two migration scenarios
+bool MigrationKey::operator<(const MigrationKey& other) const {
+    // Compare task indices first
+    if (task_idx != other.task_idx)
+        return task_idx < other.task_idx;
+    // If tasks are the same, compare target execution units
+    if (target_execution_unit != other.target_execution_unit)
+        return target_execution_unit < other.target_execution_unit;
+    // Finally, compare the entire assignment state
+    return assignments < other.assignments;
+}
 
 // Creates a cache key for a specific migration scenario
 // This captures the complete state needed to identify unique migrations
@@ -1063,8 +922,8 @@ pair<int,double> evaluate_migration(
     int task_idx,                               // Task considering moving
     int target_execution_unit,                  // Target Location
     map<MigrationKey, pair<int,double>>& migration_cache,  // Cache of previous evaluations
-    const vector<int>& core_powers = {1,2,4},      // Power consumption of cores
-    double cloud_sending_power = 0.5                    // Power for cloud communication
+    const vector<int>& core_powers,      // Power consumption of cores
+    double cloud_sending_power                    // Power for cloud communication
 ) {
     //Check if already evaluated this exact migration scenario
     MigrationKey cache_key = generate_cache_key(tasks, task_idx, target_execution_unit);
@@ -1120,28 +979,10 @@ vector<array<bool,4>> initialize_migration_choices(
     return migration_choices;
 }
 
-// Represents the complete state of a task migration decision
-struct TaskMigrationState {
-    int time;                    // Total completion time after migration
-    double energy;              // Total energy consumption after migration
-    double efficiency;          // Energy savings per unit time increase
-    int task_index;             // Which task to migrate
-    int target_execution_unit;   // Where to migrate the task
-};
-
-// Represents a potential migration candidate when considering trade-offs
-struct MigrationCandidate {
-    double neg_efficiency;       // Negative efficiency for priority queue ordering
-    int task_idx;               // Task to potentially migrate
-    int resource_idx;           // Target resource for migration
-    int time;                   // Resulting completion time
-    double energy;              // Resulting energy consumption
-
-    // Sort by efficiency (higher efficiency = higher priority)
-    bool operator<(const MigrationCandidate& other) const {
-        return neg_efficiency > other.neg_efficiency;
-    }
-};
+// Sort by efficiency (higher efficiency = higher priority)
+bool MigrationCandidate::operator<(const MigrationCandidate& other) const {
+    return neg_efficiency > other.neg_efficiency;
+}
 
 TaskMigrationState* identify_optimal_migration(
     const vector<tuple<int,int,int,double>>& migration_trials_results,
@@ -1231,8 +1072,8 @@ optimize_task_scheduling(
     vector<Task> tasks,              // Tasks to be scheduled
     vector<vector<int>> sequence, // Initial task sequences
     int T_final,                          // Target completion time
-    vector<int> core_powers = {1, 2, 4},  // Power consumption of cores
-    double cloud_sending_power = 0.5           // Power for cloud communication
+    vector<int> core_powers,  // Power consumption of cores
+    double cloud_sending_power           // Power for cloud communication
 ) {
     // Cache to avoid re-evaluating identical migration scenarios
     map<MigrationKey, pair<int,double>> migration_cache;
@@ -1738,7 +1579,6 @@ int main() {
         print_schedule_tasks(tasks);
         print_schedule_validation_report(tasks);
         print_schedule_sequences(sequence);
-
         cout << "\n\n----------------------------------------\n\n";
 
         // Step 3: Energy Optimization Phase/ Kernel Scheduling
